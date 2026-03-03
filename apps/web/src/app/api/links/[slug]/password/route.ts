@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkRateLimit } from '@/lib/rate-limit';
+import { db } from '@/lib/store';
+import { compare } from 'bcryptjs';
 
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
@@ -39,12 +41,25 @@ export async function POST(
     return NextResponse.json({ error: 'Password is required' }, { status: 400 });
   }
 
-  // TODO: look up link by slug, compare hashed password
-  // const link = await db.query.links.findFirst({ where: eq(links.slug, slug) });
-  // if (!link) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  // const valid = await bcrypt.compare(body.password, link.passwordHash);
-  // if (!valid) return NextResponse.json({ error: 'Incorrect password' }, { status: 403 });
+  const link = db.links.findBySlug(slug);
+  if (!link) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
 
-  // On success: return the destination or redirect URL
-  return NextResponse.json({ status: 'success', data: { destination: '' } });
+  if (!link.passwordHash) {
+    return NextResponse.json({ error: 'Link is not password-protected' }, { status: 400 });
+  }
+
+  const valid = await compare(body.password, link.passwordHash);
+  if (!valid) {
+    return NextResponse.json({ error: 'Incorrect password' }, { status: 403 });
+  }
+
+  // Record click on successful password verification
+  db.links.incrementClicks(link.id);
+
+  return NextResponse.json(
+    { status: 'success', data: { destination: link.destination } },
+    { status: 200 },
+  );
 }

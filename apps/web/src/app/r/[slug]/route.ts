@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkRateLimit } from '@/lib/rate-limit';
+import { db } from '@/lib/store';
+import { escapeHtml } from '@/lib/escape';
 
 const RATE_LIMIT_REDIRECT = 60;
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
@@ -24,14 +26,54 @@ export async function GET(
     );
   }
 
-  // TODO: look up link by slug in DB
-  // const link = await db.query.links.findFirst({ where: eq(links.slug, slug) });
-  // if (!link) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  // if (link.passwordHash) redirect to password page
-  // TODO: record analytics click
-  // return NextResponse.redirect(link.destination, 302);
+  const link = db.links.findBySlug(slug);
+  if (!link) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
 
-  void slug;
+  // Check expiration
+  if (link.expiresAt && new Date() >= link.expiresAt) {
+    return NextResponse.json({ error: 'Link has expired' }, { status: 410 });
+  }
 
-  return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  // Check max clicks
+  if (link.maxClicks !== null && link.clickCount >= link.maxClicks) {
+    return NextResponse.json({ error: 'Link has reached its click limit' }, { status: 410 });
+  }
+
+  // Password-protected: return gate page
+  if (link.passwordHash) {
+    const safeSlug = escapeHtml(slug);
+    const html = `<!DOCTYPE html>
+<html><head><title>Password Required</title></head>
+<body>
+<h1>This link is password-protected</h1>
+<form method="POST" action="/api/links/${safeSlug}/password">
+<input type="password" name="password" required />
+<button type="submit">Submit</button>
+</form>
+</body></html>`;
+    return new NextResponse(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
+  }
+
+  // Record click
+  db.links.incrementClicks(link.id);
+
+  // Build destination URL with campaign UTM params if applicable
+  let destination = link.destination;
+  if (link.campaignId) {
+    const campaign = db.campaigns.findById(link.campaignId);
+    if (campaign) {
+      const url = new URL(destination);
+      url.searchParams.set('utm_source', campaign.utmSource);
+      url.searchParams.set('utm_medium', campaign.utmMedium);
+      url.searchParams.set('utm_campaign', campaign.utmCampaign);
+      destination = url.toString();
+    }
+  }
+
+  return NextResponse.redirect(destination, 301);
 }
